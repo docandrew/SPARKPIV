@@ -80,6 +80,11 @@ is
             Transmit.all (Cmd (0 .. Cmd_Len - 1), Resp, Resp_Len, OK);
             if not OK or else Resp_Len < 2 or else Resp_Len > Resp'Length then
                Result := Transport_Failure;
+               pragma Warnings (GNATprove, Off, "unused assignment",
+                                Reason => "scrub of command data (may be the PIN); the store is kept by Inspection_Point");
+               Cmd := (others => 0);
+               pragma Warnings (GNATprove, On, "unused assignment");
+               pragma Inspection_Point (Cmd);
                return;
             end if;
             SW1 := Resp (Resp_Len - 2);
@@ -91,6 +96,11 @@ is
             --  An intermediate chained piece must be acknowledged 90 00.
             if SW1 /= 16#90# or else SW2 /= 16#00# then
                Result := SW_To_Status (SW1, SW2);
+               pragma Warnings (GNATprove, Off, "unused assignment",
+                                Reason => "scrub of command data (may be the PIN); the store is kept by Inspection_Point");
+               Cmd := (others => 0);
+               pragma Warnings (GNATprove, On, "unused assignment");
+               pragma Inspection_Point (Cmd);
                return;
             end if;
          end;
@@ -137,6 +147,12 @@ is
          Data := (others => 0);
          Data_Len := 0;
       end if;
+      --  Cmd carried the command data (the PIN, for VERIFY): scrub it.
+      pragma Warnings (GNATprove, Off, "unused assignment",
+                       Reason => "scrub of command data (may be the PIN); the store is kept by Inspection_Point");
+      Cmd := (others => 0);
+      pragma Warnings (GNATprove, On, "unused assignment");
+      pragma Inspection_Point (Cmd);
    end Exchange;
 
    --  ------------------------------------------------------------------
@@ -243,7 +259,14 @@ is
       if Result = Wrong_PIN then
          Retries_Left := Natural (SW2 and 16#0F#);
       end if;
+      --  Scrub the PIN copy. The Inspection_Point keeps the store: without
+      --  it flow analysis calls this a dead assignment and the compiler
+      --  may drop it.
+      pragma Warnings (GNATprove, Off, "unused assignment",
+                       Reason => "scrub of the PIN; the store is kept by Inspection_Point");
       Padded := (others => 0);
+      pragma Warnings (GNATprove, On, "unused assignment");
+      pragma Inspection_Point (Padded);
    end Verify_PIN;
 
    procedure Read_Certificate

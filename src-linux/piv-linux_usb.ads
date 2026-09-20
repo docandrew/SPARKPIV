@@ -1,9 +1,10 @@
---  PIV.Linux_USB: a plain-Ada CCID transport for SPARKPIV on Linux. Talks to
---  the YubiKey's smart-card interface directly through /dev/bus/usb (usbfs
---  ioctls; libc open/ioctl/close are the only foreign calls), no pcscd, no
---  libpcsclite, no libusb. The CCID layer (USB CCID rev 1.1,
---  PC_to_RDR_XfrBlock / RDR_to_PC_DataBlock) is the same one a native driver
---  on CuBit implements above its USB host stack.
+--  PIV.Linux_USB: the Linux half of a CCID transport for SPARKPIV. Finds the
+--  token through sysfs, claims its CCID interface through /dev/bus/usb
+--  (usbfs ioctls; libc open/ioctl/close are the only foreign calls), and
+--  supplies the two bulk-transfer callbacks that the SPARK PIV.CCID layer
+--  drives. No pcscd, no libpcsclite, no libusb. Another host (CuBit, via IPC
+--  to its USB service) implements the same two callbacks and reuses PIV.CCID
+--  and PIV unchanged.
 --
 --  Optional: built by sparkpiv_linux.gpr, not by the core sparkpiv.gpr, so
 --  the SPARK protocol crate stays free of OS dependencies. Not SPARK.

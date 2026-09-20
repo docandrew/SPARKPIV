@@ -5,6 +5,7 @@ with Interfaces;                use Interfaces;
 with Interfaces.C;              use Interfaces.C;
 with Interfaces.C.Strings;
 with System;
+with PIV.CCID;
 
 package body PIV.Linux_USB is
 
@@ -48,7 +49,6 @@ package body PIV.Linux_USB is
    Iface     : unsigned := 0;
    EP_Out    : unsigned := 0;
    EP_In     : unsigned := 0;
-   Seq       : Unsigned_8 := 0;
    Connected : Boolean := False;
 
    function Read_Sysfs (Path : String) return String is
@@ -158,93 +158,48 @@ package body PIV.Linux_USB is
    end Locate;
 
    ----------------------------------------------------------------------
-   --  CCID messages (rev 1.1, 10-byte header, little-endian dwLength)
+   --  The two bulk-transfer callbacks PIV.CCID drives; everything above
+   --  them (framing, sequence numbers, status) is the SPARK CCID layer.
    ----------------------------------------------------------------------
-   type Buf is array (Natural range <>) of Unsigned_8;
-
-   function Bulk (EP : unsigned; Data : in out Buf; Len : Natural; Timeout_Ms : unsigned) return Integer is
-      --  Returns bytes transferred, or -1.
-      T : aliased Bulk_Transfer :=
-        (EP => EP, Len => unsigned (Len), Timeout => Timeout_Ms, Pad => 0, Data => Data'Address);
-      R : int;
+   procedure Bulk_Out (Data : in Bytes; OK : out Boolean) is
+      Buf : aliased array (0 .. Natural (Data'Length) - 1) of Unsigned_8;
+      T   : aliased Bulk_Transfer :=
+        (EP => EP_Out, Len => unsigned (Data'Length), Timeout => 5000, Pad => 0, Data => Buf'Address);
    begin
-      R := C_Ioctl (FD, USBDEVFS_BULK, T'Address);
-      return Integer (R);
-   end Bulk;
+      for I in Buf'Range loop
+         Buf (I) := Unsigned_8 (Data (Data'First + Index (I)));
+      end loop;
+      OK := Integer (C_Ioctl (FD, USBDEVFS_BULK, T'Address)) = Buf'Length;
+   end Bulk_Out;
 
-   --  Send one CCID command with payload, receive the RDR_to_PC response
-   --  (following time-extension requests), return its payload.
-   procedure CCID_Exchange
-     (Msg_Type : Unsigned_8;
-      Payload  : Buf;
-      Extra    : Buf;                --  the 3 message-specific header bytes
-      Out_Data : out Buf;
-      Out_Len  : out Natural;
-      OK       : out Boolean)
-   is
-      Cmd  : Buf (0 .. 10 + Payload'Length - 1);
-      Rsp  : Buf (0 .. 4095) := (others => 0);
-      L    : constant Unsigned_32 := Unsigned_32 (Payload'Length);
-      N    : Integer;
+   procedure Bulk_In (Data : out Bytes; Len : out Index; OK : out Boolean) is
+      Buf : aliased array (0 .. Natural (Data'Length) - 1) of Unsigned_8 := (others => 0);
+      T   : aliased Bulk_Transfer :=
+        (EP => EP_In, Len => unsigned (Data'Length), Timeout => 10000, Pad => 0, Data => Buf'Address);
+      N   : constant Integer := Integer (C_Ioctl (FD, USBDEVFS_BULK, T'Address));
    begin
-      Out_Data := (others => 0);
-      Out_Len := 0;
+      Data := (others => 0);
+      Len := 0;
       OK := False;
-      Seq := Seq + 1;
-      Cmd (0) := Msg_Type;
-      Cmd (1) := Unsigned_8 (L and 16#FF#);
-      Cmd (2) := Unsigned_8 (Shift_Right (L, 8) and 16#FF#);
-      Cmd (3) := Unsigned_8 (Shift_Right (L, 16) and 16#FF#);
-      Cmd (4) := Unsigned_8 (Shift_Right (L, 24) and 16#FF#);
-      Cmd (5) := 0;          --  bSlot
-      Cmd (6) := Seq;        --  bSeq
-      Cmd (7 .. 9) := Extra;
-      if Payload'Length > 0 then
-         Cmd (10 .. Cmd'Last) := Payload;
-      end if;
-      N := Bulk (EP_Out, Cmd, Cmd'Length, 5000);
-      if N /= Cmd'Length then
+      if N < 0 or else N > Buf'Length then
          return;
       end if;
-      loop
-         N := Bulk (EP_In, Rsp, Rsp'Length, 10000);
-         if N < 10 then
-            return;
-         end if;
-         --  bStatus bits 7..6: 0 processed, 1 failed, 2 time extension.
-         declare
-            Status  : constant Unsigned_8 := Shift_Right (Rsp (7), 6);
-            DLen    : constant Natural :=
-              Natural (Rsp (1)) + 256 * Natural (Rsp (2)) + 65536 * Natural (Rsp (3));
-         begin
-            if Rsp (6) /= Seq then
-               return;                       --  not our response
-            end if;
-            if Status = 2 then
-               null;                         --  card asked for more time: read again
-            elsif Status = 1 then
-               return;                       --  command failed (bError in Rsp (8))
-            else
-               if DLen > Out_Data'Length or else 10 + DLen > N then
-                  return;
-               end if;
-               Out_Data (Out_Data'First .. Out_Data'First + DLen - 1) := Rsp (10 .. 10 + DLen - 1);
-               Out_Len := DLen;
-               OK := True;
-               return;
-            end if;
-         end;
+      for I in 0 .. N - 1 loop
+         Data (Data'First + Index (I)) := Byte (Buf (I));
       end loop;
-   end CCID_Exchange;
+      Len := Index (N);
+      OK := True;
+   end Bulk_In;
+
+   Card : CCID.Reader := (Bulk_Out => Bulk_Out'Access, Bulk_In => Bulk_In'Access, Seq => 0, Slot => 0);
 
    procedure Connect (Info : out String; Info_Len : out Natural; OK : out Boolean) is
       Node    : String (1 .. 64);
       N_Len   : Natural;
       Found   : Boolean;
       R       : int;
-      Empty   : constant Buf (1 .. 0) := (others => 0);
-      ATR     : Buf (0 .. 63);
-      ATR_Len : Natural;
+      ATR     : Bytes (0 .. 63);
+      ATR_Len : Index;
       X_OK    : Boolean;
    begin
       Info := (others => ' ');
@@ -277,9 +232,7 @@ package body PIV.Linux_USB is
          end if;
       end;
       Connected := True;
-      --  PC_to_RDR_IccPowerOn (62): bPowerSelect 0 = automatic. The
-      --  RDR_to_PC_DataBlock carries the ATR.
-      CCID_Exchange (16#62#, Empty, (0, 0, 0), ATR, ATR_Len, X_OK);
+      CCID.Power_On (Card, ATR, ATR_Len, X_OK);
       if not X_OK then
          Disconnect;
          return;
@@ -299,29 +252,23 @@ package body PIV.Linux_USB is
       Resp_Len :    out Index;
       OK       :    out Boolean)
    is
-      Payload : Buf (0 .. Natural (Cmd'Length) - 1);
-      Data    : Buf (0 .. 4095);
-      D_Len   : Natural;
-      X_OK    : Boolean;
+      Data  : Bytes (0 .. CCID.Max_Payload - 1);
+      D_Len : Index;
+      X_OK  : Boolean;
+      Cmd0  : constant Bytes (0 .. Cmd'Length - 1) := Cmd;   --  CCID wants 'First = 0
    begin
       Resp := (others => 0);
       Resp_Len := 0;
       OK := False;
-      if not Connected then
+      if not Connected or else Cmd'Length = 0 or else Cmd'Length > CCID.Max_Payload then
          return;
       end if;
-      for I in Payload'Range loop
-         Payload (I) := Unsigned_8 (Cmd (Cmd'First + Index (I)));
-      end loop;
-      --  PC_to_RDR_XfrBlock (6F): bBWI 0, wLevelParameter 0 (whole APDU).
-      CCID_Exchange (16#6F#, Payload, (0, 0, 0), Data, D_Len, X_OK);
-      if not X_OK or else D_Len < 2 or else D_Len > Natural (Resp'Length) then
+      CCID.Transfer (Card, Cmd0, Data, D_Len, X_OK);
+      if not X_OK or else D_Len < 2 or else D_Len > Resp'Length then
          return;
       end if;
-      for I in 0 .. D_Len - 1 loop
-         Resp (Resp'First + Index (I)) := Byte (Data (I));
-      end loop;
-      Resp_Len := Index (D_Len);
+      Resp (Resp'First .. Resp'First + D_Len - 1) := Data (0 .. D_Len - 1);
+      Resp_Len := D_Len;
       OK := True;
    end Transmit;
 

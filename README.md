@@ -24,17 +24,27 @@ management-key authentication). `yubico-piv-tool` does that for now.
 
 ## Transports
 
-The callback shape is `procedure (Cmd : in Bytes; Resp : out Bytes; Resp_Len :
-out Index; OK : out Boolean)`, one complete APDU per call.
+`PIV` speaks to the card through one callback, `procedure (Cmd : in Bytes;
+Resp : out Bytes; Resp_Len : out Index; OK : out Boolean)`, one complete APDU
+per call. Below that sits a second SPARK layer for the common case of a USB
+smart-card interface:
+
+- `PIV.CCID` (`src/`, SPARK): USB CCID rev 1.1 message framing.
+  `PC_to_RDR_IccPowerOn`, `PC_to_RDR_XfrBlock`, `RDR_to_PC_DataBlock`;
+  sequence numbers, time-extension retries, command status, length checks
+  on what the device claims. It owns no I/O: a `Reader` carries two
+  callbacks, `Bulk_Out (Data)` and `Bulk_In (Data, Len)`, and that is the
+  whole OS-specific surface. `tests/test_ccid_mock.adb` drives it with a
+  scripted reader.
 
 - `PIV.Linux_USB` (`src-linux/`, built by the optional `sparkpiv_linux.gpr`):
   plain Ada, Linux, not SPARK. Finds the token through sysfs, claims its CCID
-  interface through `/dev/bus/usb` (usbfs ioctls; libc `open`/`ioctl`/`close`
-  are the only foreign calls), and speaks USB CCID rev 1.1
-  (`PC_to_RDR_XfrBlock` / `RDR_to_PC_DataBlock`). No pcscd, no libpcsclite,
-  no libusb. It is the desktop stand-in for a native CCID driver on CuBit.
-  Consumers `with "sparkpiv_linux.gpr"` (which brings `sparkpiv.gpr` along)
-  and `with PIV.Linux_USB;`. The core `sparkpiv.gpr` stays OS-free.
+  interface through `/dev/bus/usb`, and implements the two bulk-transfer
+  callbacks with usbfs ioctls (libc `open`/`ioctl`/`close` are the only
+  foreign calls). No pcscd, no libpcsclite, no libusb. Consumers `with
+  "sparkpiv_linux.gpr"` (which brings `sparkpiv.gpr` along) and `with
+  PIV.Linux_USB;`. Another host (CuBit, via IPC to its USB service) supplies
+  the same two callbacks and reuses `PIV` and `PIV.CCID` unchanged.
 - Anything else that moves APDUs: PC/SC, a serial reader, NFC.
 
 ## Probe
@@ -60,16 +70,19 @@ extraction across GET RESPONSE chunk boundaries, and command chaining on a
 512-byte RSA block.
 
     alr build
-    alr exec -- gprbuild -P tests/tests.gpr && tests/bin/test_piv_mock
+    alr exec -- gprbuild -P tests/tests.gpr && tests/bin/test_piv_mock && tests/bin/test_ccid_mock
+    #  proof (the crate lists two project files, so name the one to prove):
+    alr exec -- gnatprove -P sparkpiv.gpr --level=1
 
 ## Status and what "proven" means here
 
 First cut, 2026-09-20. Builds with GNAT 16.
 
-`src/` (the PIV protocol) is `SPARK_Mode On` and gnatprove discharges every
-check at level 1 (205 checks, 0 unproved): absence of runtime errors on any
-input the token or the caller can supply, including malformed TLV and bogus
-lengths from a hostile card, and flow correctness. The contracts are
+`src/` (the PIV protocol and the CCID framing) is `SPARK_Mode On` and
+gnatprove discharges every check at level 1 (254 checks, 0 unproved):
+absence of runtime errors on any input the token or the caller can supply,
+including malformed TLV, bogus lengths and oversized CCID length claims from
+a hostile device, and flow correctness. The contracts are
 Silver-level (buffer bounds, "no output unless success"); they do not state
 functional correctness of the protocol. That the APDUs are the right bytes
 and the TLV walker follows BER is established by `tests/test_piv_mock.adb`
@@ -81,15 +94,9 @@ AUTHENTICATE with a P-256 key in slot 9E signing live TLS 1.3 and TLS 1.2
 handshakes. Command chaining (CLA 10, for RSA-sized payloads) and Ed25519
 (algorithm E0, firmware 5.7+) have run only against the scripted transport.
 
-Not SPARK: `src-linux/` (the Linux transport) and `examples/`.
+Not SPARK: `src-linux/` (sysfs discovery and the two usbfs bulk calls) and
+`examples/`.
 
-Planned next:
-
-- Split the transport: a SPARK `PIV.CCID` package for CCID message framing
-  and response parsing (the part that consumes bytes from the device) over a
-  two-call bulk-transfer interface, leaving only the usbfs and sysfs calls in
-  the Linux shim. A different host (CuBit, via IPC to a USB service)
-  implements the two bulk calls and gets PIV and CCID verified.
-- Make the PIN scrub in `Verify_PIN` a real sanitize (flow analysis flags the
-  final zeroing as a dead store the compiler may drop; SPARKNaCl's
-  `No_Inline` idiom is the fix).
+The PIN copies (`Verify_PIN`'s padded buffer and the command buffer in
+`Exchange`) are zeroed on every exit with `pragma Inspection_Point`, which
+keeps the store from being optimised away.

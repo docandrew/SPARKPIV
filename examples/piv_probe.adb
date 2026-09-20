@@ -24,17 +24,17 @@ procedure PIV_Probe is
          when Slot_9D_Key_Management      => "9d",
          when Slot_9E_Card_Authentication => "9e");
 
-   procedure Dump (Name : String; Cert : Bytes; Len : Index) is
-      use Ada.Streams.Stream_IO;
-      F : File_Type;
+   procedure Dump (Name : String; Cert : Bytes; Len : PIV.Index) is
+      --  Stream_IO also declares File_Type and Index: qualify, don't use.
+      F  : Ada.Streams.Stream_IO.File_Type;
       SE : Ada.Streams.Stream_Element_Array (1 .. Ada.Streams.Stream_Element_Offset (Len));
    begin
       for I in SE'Range loop
-         SE (I) := Ada.Streams.Stream_Element (Cert (Index (I) - 1));
+         SE (I) := Ada.Streams.Stream_Element (Cert (PIV.Index (I) - 1));
       end loop;
-      Create (F, Out_File, Name);
-      Write (F, SE);
-      Close (F);
+      Ada.Streams.Stream_IO.Create (F, Ada.Streams.Stream_IO.Out_File, Name);
+      Ada.Streams.Stream_IO.Write (F, SE);
+      Ada.Streams.Stream_IO.Close (F);
       Put_Line ("     wrote " & Name);
    end Dump;
 begin
