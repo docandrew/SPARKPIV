@@ -25,6 +25,8 @@ procedure Test_PIV_Mock is
    Cert_Len  : constant := 300;
    function Cert_Byte (I : Index) return Byte is (Byte (I mod 251));
 
+   Compressed  : Boolean := False;   --  serve a 71 01 01 CertInfo (gzip flag)
+   Endless_61  : Boolean := False;   --  answer every GET RESPONSE with 61 00, no data
    Obj : Bytes (0 .. 4 + 4 + Cert_Len + 3 + 2 - 1);
    Obj_Len : Index;
 
@@ -36,7 +38,7 @@ procedure Test_PIV_Mock is
       Put (16#53#); Put (16#82#); Put (Byte (Inner / 256)); Put (Byte (Inner mod 256));
       Put (16#70#); Put (16#82#); Put (Byte (Cert_Len / 256)); Put (Byte (Cert_Len mod 256));
       for I in Index range 0 .. Cert_Len - 1 loop Put (Cert_Byte (I)); end loop;
-      Put (16#71#); Put (16#01#); Put (16#00#);
+      Put (16#71#); Put (16#01#); Put (if Compressed then 16#01# else 16#00#);
       Put (16#FE#); Put (16#00#);
       Obj_Len := P;
    end Build_Object;
@@ -67,6 +69,10 @@ procedure Test_PIV_Mock is
       Last_Cmd_Len := Cmd'Length;
       Resp := (others => 0); Resp_Len := 0; OK := False;
 
+      if Cmd (1) = 16#C0# and then Endless_61 then
+         Reply (None, 16#61#, 16#00#);   --  "more coming", never delivers
+         return;
+      end if;
       if Cmd (1) = 16#C0# then
          --  GET RESPONSE: next chunk of the object.
          declare
@@ -87,6 +93,7 @@ procedure Test_PIV_Mock is
             Reply (None, 16#90#, 16#00#);
          when 16#20# =>                       --  VERIFY
             if Mode = 1 then Reply (None, 16#63#, 16#C2#);   --  wrong PIN, 2 left
+            elsif Mode = 3 then Reply (None, 16#63#, 16#C0#);   --  wrong PIN, none left
             elsif Mode = 2 then Reply (None, 16#69#, 16#83#);   --  blocked
             else Reply (None, 16#90#, 16#00#); end if;
          when 16#CB# =>                       --  GET DATA: first 256 bytes, more pending
@@ -132,6 +139,9 @@ begin
       Mode := 2;
       Verify_PIN (T, PIN, R, Retries);
       Check ("blocked PIN reported", R = PIN_Blocked);
+      Mode := 3;
+      Verify_PIN (T, PIN, R, Retries);
+      Check ("wrong PIN with zero retries left", R = Wrong_PIN and Retries = 0);
       Mode := 0;
    end;
 
@@ -148,6 +158,31 @@ begin
       Check ("certificate bytes intact across chunk boundaries",
              (for all I in Index range 0 .. Cert_Len - 1 => Cert (I) = Cert_Byte (I)));
       Check ("chaining used GET RESPONSE (more than one command)", Cmd_Count > 1);
+   end;
+
+   --  Hostile card: promises data forever. Must terminate with a status,
+   --  not hang (the loop is bounded and zero-progress is malformed).
+   declare
+      Cert : Bytes (0 .. 1023);
+      C_Len : Index;
+   begin
+      Endless_61 := True;
+      Cmd_Count := 0;
+      Read_Certificate (T, Slot_9C_Signature, Cert, C_Len, R);
+      Check ("endless 61 00 with no data: Malformed_Response, no hang", R = Malformed_Response and C_Len = 0);
+      Check ("endless 61 00: stopped after one round", Cmd_Count = 2);
+      Endless_61 := False;
+   end;
+
+   --  Compressed certificate (CertInfo bit 0): refused with a distinct status.
+   declare
+      Cert : Bytes (0 .. 1023);
+      C_Len : Index;
+   begin
+      Compressed := True; Build_Object;
+      Read_Certificate (T, Slot_9C_Signature, Cert, C_Len, R);
+      Check ("gzip-compressed certificate: Unsupported_Encoding", R = Unsupported_Encoding and C_Len = 0);
+      Compressed := False; Build_Object;
    end;
 
    declare

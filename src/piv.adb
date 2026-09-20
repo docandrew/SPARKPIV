@@ -41,6 +41,25 @@ is
       OK       : Boolean;
       Sent     : Index := 0;
       Total    : constant Index := Cmd_Data'Length;
+      --  GET RESPONSE rounds: a Max_Object response needs at most
+      --  Max_Object / 256 + 1 rounds; anything beyond is a card that will
+      --  not stop promising data.
+      Max_Rounds : constant := Max_Object / 256 + 2;
+      Rounds     : Natural := 0;
+
+      --  Cmd carried the command data (the PIN, for VERIFY). Zero it on
+      --  every exit; Inspection_Point keeps the store.
+      procedure Scrub_Cmd with
+        Global => (In_Out => Cmd),
+        Post   => (for all B of Cmd => B = 0)
+      is
+      begin
+         pragma Warnings (GNATprove, Off, "unused assignment",
+                          Reason => "scrub of command data; the store is kept by Inspection_Point");
+         Cmd := (others => 0);
+         pragma Warnings (GNATprove, On, "unused assignment");
+         pragma Inspection_Point (Cmd);
+      end Scrub_Cmd;
    begin
       Data := (others => 0);
       Data_Len := 0;
@@ -80,11 +99,7 @@ is
             Transmit.all (Cmd (0 .. Cmd_Len - 1), Resp, Resp_Len, OK);
             if not OK or else Resp_Len < 2 or else Resp_Len > Resp'Length then
                Result := Transport_Failure;
-               pragma Warnings (GNATprove, Off, "unused assignment",
-                                Reason => "scrub of command data (may be the PIN); the store is kept by Inspection_Point");
-               Cmd := (others => 0);
-               pragma Warnings (GNATprove, On, "unused assignment");
-               pragma Inspection_Point (Cmd);
+               Scrub_Cmd;
                return;
             end if;
             SW1 := Resp (Resp_Len - 2);
@@ -96,20 +111,21 @@ is
             --  An intermediate chained piece must be acknowledged 90 00.
             if SW1 /= 16#90# or else SW2 /= 16#00# then
                Result := SW_To_Status (SW1, SW2);
-               pragma Warnings (GNATprove, Off, "unused assignment",
-                                Reason => "scrub of command data (may be the PIN); the store is kept by Inspection_Point");
-               Cmd := (others => 0);
-               pragma Warnings (GNATprove, On, "unused assignment");
-               pragma Inspection_Point (Cmd);
+               Scrub_Cmd;
                return;
             end if;
          end;
       end loop;
 
-      --  Collect response data, following 61 XX with GET RESPONSE.
+      --  Collect response data, following 61 XX with GET RESPONSE. Bounded:
+      --  a card that keeps saying "more" without delivering (61 00 and no
+      --  bytes), or that exceeds the round budget, is malformed, not a
+      --  reason to loop.
       loop
          pragma Loop_Invariant (Data_Len <= Data'Length);
          pragma Loop_Invariant (Resp_Len >= 2 and then Resp_Len <= Resp'Length);
+         pragma Loop_Invariant (Rounds <= Max_Rounds);
+         pragma Loop_Variant (Increases => Rounds);
          declare
             Chunk : constant Index := Resp_Len - 2;
          begin
@@ -118,13 +134,28 @@ is
                   Data := (others => 0);
                   Data_Len := 0;
                   Result := Buffer_Too_Small;
+                  Scrub_Cmd;
                   return;
                end if;
                Data (Data_Len .. Data_Len + Chunk - 1) := Resp (0 .. Chunk - 1);
                Data_Len := Data_Len + Chunk;
+            elsif SW1 = 16#61# then
+               Data := (others => 0);
+               Data_Len := 0;
+               Result := Malformed_Response;   --  promised more, sent nothing
+               Scrub_Cmd;
+               return;
             end if;
          end;
          exit when SW1 /= 16#61#;
+         Rounds := Rounds + 1;
+         if Rounds > Max_Rounds then
+            Data := (others => 0);
+            Data_Len := 0;
+            Result := Malformed_Response;
+            Scrub_Cmd;
+            return;
+         end if;
          Cmd := (others => 0);
          Cmd (0) := 16#00#;
          Cmd (1) := 16#C0#;   --  GET RESPONSE
@@ -136,6 +167,7 @@ is
             Data := (others => 0);
             Data_Len := 0;
             Result := Transport_Failure;
+            Scrub_Cmd;
             return;
          end if;
          SW1 := Resp (Resp_Len - 2);
@@ -147,12 +179,7 @@ is
          Data := (others => 0);
          Data_Len := 0;
       end if;
-      --  Cmd carried the command data (the PIN, for VERIFY): scrub it.
-      pragma Warnings (GNATprove, Off, "unused assignment",
-                       Reason => "scrub of command data (may be the PIN); the store is kept by Inspection_Point");
-      Cmd := (others => 0);
-      pragma Warnings (GNATprove, On, "unused assignment");
-      pragma Inspection_Point (Cmd);
+      Scrub_Cmd;
    end Exchange;
 
    --  ------------------------------------------------------------------
@@ -171,7 +198,8 @@ is
       OK      : out Boolean)
    with
      Pre  => Buf'First = 0 and then Len <= Buf'Length and then Pos <= Len,
-     Post => (if OK then Val_Pos <= Len and then Val_Len <= Len - Val_Pos)
+     Post => (if OK then Val_Pos >= Pos + 2 and then Val_Pos <= Len
+                       and then Val_Len <= Len - Val_Pos)
    is
       use type Interfaces.Unsigned_16;
       P : Index := Pos;
@@ -299,31 +327,45 @@ is
          Result := Malformed_Response;
          return;
       end if;
+      --  Walk every element: 70 is the certificate, 71 (CertInfo) says
+      --  whether it is stored gzip-compressed (bit 0), FE is the error
+      --  detection code. Decide only after seeing them all.
       declare
-         Inner_End : constant Index := V_Pos + V_Len;
-         P         : Index := V_Pos;
+         Inner_End  : constant Index := V_Pos + V_Len;
+         P          : Index := V_Pos;
+         C_Pos      : Index := 0;
+         C_Len      : Index := 0;
+         Compressed : Boolean := False;
       begin
          while P < Inner_End loop
             pragma Loop_Invariant (P <= Inner_End and then Inner_End <= Data_Len);
+            pragma Loop_Invariant (C_Len <= Data_Len and then C_Pos <= Data_Len - C_Len);
+            pragma Loop_Variant (Increases => P);
             Parse_TLV (Data, Inner_End, P, Tag, V_Pos, V_Len, OK);
             if not OK then
                Result := Malformed_Response;
                return;
             end if;
             if Tag = 16#70# then
-               if V_Len = 0 or else V_Len > Cert'Length then
-                  Result := (if V_Len = 0 then Malformed_Response else Buffer_Too_Small);
-                  return;
-               end if;
-               Cert (0 .. V_Len - 1) := Data (V_Pos .. V_Pos + V_Len - 1);
-               Cert_Len := V_Len;
-               Result := Success;
-               return;
+               C_Pos := V_Pos;
+               C_Len := V_Len;
+            elsif Tag = 16#71# and then V_Len >= 1 then
+               Compressed := (Data (V_Pos) and 16#01#) /= 0;
             end if;
             P := V_Pos + V_Len;
          end loop;
+         if C_Len = 0 then
+            Result := Malformed_Response;
+         elsif Compressed then
+            Result := Unsupported_Encoding;
+         elsif C_Len > Cert'Length then
+            Result := Buffer_Too_Small;
+         else
+            Cert (0 .. C_Len - 1) := Data (C_Pos .. C_Pos + C_Len - 1);
+            Cert_Len := C_Len;
+            Result := Success;
+         end if;
       end;
-      Result := Malformed_Response;
    end Read_Certificate;
 
    procedure Sign
