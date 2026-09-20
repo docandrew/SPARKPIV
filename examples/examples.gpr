@@ -1,0 +1,11 @@
+with "../sparkpiv_linux.gpr";
+project Examples is
+   for Source_Dirs use (".");
+   for Object_Dir use "obj";
+   for Exec_Dir use "bin";
+   for Create_Missing_Dirs use "True";
+   for Main use ("piv_probe.adb");
+   package Compiler is
+      for Default_Switches ("Ada") use ("-gnat2022", "-gnatwa", "-gnatwJ", "-O1");
+   end Compiler;
+end Examples;

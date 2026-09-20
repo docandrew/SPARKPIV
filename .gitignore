@@ -1,0 +1,11 @@
+obj/
+lib/
+alire/
+tests/obj/
+tests/bin/
+*.ali
+obj-linux/
+lib-linux/
+examples/obj/
+examples/bin/
+config/
