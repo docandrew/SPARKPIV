@@ -170,6 +170,9 @@ package body PIV.Linux_USB is
          Buf (I) := Unsigned_8 (Data (Data'First + Index (I)));
       end loop;
       OK := Integer (C_Ioctl (FD, USBDEVFS_BULK, T'Address)) = Buf'Length;
+      --  The copy may hold a VERIFY APDU (the PIN): scrub it.
+      Buf := (others => 0);
+      pragma Inspection_Point (Buf);
    end Bulk_Out;
 
    procedure Bulk_In (Data : out Bytes; Len : out Index; OK : out Boolean) is
@@ -205,6 +208,9 @@ package body PIV.Linux_USB is
       Info := (others => ' ');
       Info_Len := 0;
       OK := False;
+      if Connected then
+         Disconnect;                 --  a second Connect must not leak the first FD
+      end if;
       Locate (Node, N_Len, Found);
       if not Found then
          return;
@@ -255,15 +261,19 @@ package body PIV.Linux_USB is
       Data  : Bytes (0 .. CCID.Max_Payload - 1);
       D_Len : Index;
       X_OK  : Boolean;
-      Cmd0  : constant Bytes (0 .. Cmd'Length - 1) := Cmd;   --  CCID wants 'First = 0
+      Cmd0  : Bytes (0 .. Cmd'Length - 1) := Cmd;   --  CCID wants 'First = 0
    begin
       Resp := (others => 0);
       Resp_Len := 0;
       OK := False;
       if not Connected or else Cmd'Length = 0 or else Cmd'Length > CCID.Max_Payload then
+         Cmd0 := (others => 0);
+         pragma Inspection_Point (Cmd0);
          return;
       end if;
       CCID.Transfer (Card, Cmd0, Data, D_Len, X_OK);
+      Cmd0 := (others => 0);          --  may hold the PIN
+      pragma Inspection_Point (Cmd0);
       if not X_OK or else D_Len < 2 or else D_Len > Resp'Length then
          return;
       end if;

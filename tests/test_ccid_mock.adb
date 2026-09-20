@@ -48,7 +48,11 @@ procedure Test_CCID_Mock is
          when 1 =>   --  time extension first, then the data
             if Reads = 1 then Block (16#80#, Reply (1 .. 0)); else Block (0, Reply); end if;
          when 2 => Block (16#40#, Reply (1 .. 0));                              --  command failed
-         when 3 => Block (16#00#, Reply); Data (6) := Seq + 1;                  --  wrong sequence
+         when 3 =>   --  a stale block (foreign bSeq) first, then the real one: must resync
+            if Reads = 1 then Block (16#00#, Reply); Data (6) := Seq + 1; else Block (16#00#, Reply); end if;
+         when 5 => Block (16#00#, Reply); Data (0) := 16#81#;                    --  RDR_to_PC_SlotStatus, not a DataBlock
+         when 6 => Block (16#C0#, Reply);                                       --  reserved command status 3
+         when 7 => Block (16#80#, Reply (1 .. 0));                              --  time extension forever
          when 4 => Block (16#00#, Reply); Data (1) := 16#FF#; Data (2) := 16#0F#; --  claims 4095 bytes, sent 4
          when others => OK := False; Len := 0; Data := (others => 0);
       end case;
@@ -75,7 +79,16 @@ begin
    Check ("command failed status: not OK, no data", not OK and L = 0);
    Script := 3;
    Transfer (R, APDU, Resp, L, OK);
-   Check ("foreign sequence number: rejected", not OK and L = 0);
+   Check ("stale block with foreign sequence number is discarded, real answer taken", OK and Reads = 2 and L = 4);
+   Script := 5;
+   Transfer (R, APDU, Resp, L, OK);
+   Check ("non-DataBlock message type: rejected", not OK and L = 0);
+   Script := 6;
+   Transfer (R, APDU, Resp, L, OK);
+   Check ("reserved command status: rejected", not OK and L = 0);
+   Script := 7;
+   Transfer (R, APDU, Resp, L, OK);
+   Check ("endless time extension: bounded, fails", not OK and L = 0 and Reads = 8);
    Script := 4;
    Transfer (R, APDU, Resp, L, OK);
    Check ("dwLength larger than the block: rejected", not OK and L = 0);

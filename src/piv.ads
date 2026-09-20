@@ -48,7 +48,8 @@ is
                  Slot_9D_Key_Management, Slot_9E_Card_Authentication);
 
    type Algorithm is (ECC_P256, ECC_P384, RSA_2048, RSA_3072, RSA_4096, Ed25519);
-   --  Ed25519 (algorithm E0) needs YubiKey firmware 5.7 or later.
+   --  RSA-3072, RSA-4096 and Ed25519 (algorithm E0) need YubiKey firmware
+   --  5.7 or later.
 
    type Status is
      (Success,
@@ -58,7 +59,10 @@ is
       PIN_Blocked,             --  69 83
       Security_Status,         --  69 82: PIN not verified for this slot
       Not_Found,               --  6A 82: no such object / empty slot
-      Malformed_Response,      --  TLV did not parse as expected
+      Malformed_Response,      --  TLV did not parse as expected, or the card
+                               --  promised more data and delivered none
+      Unsupported_Encoding,    --  certificate stored gzip-compressed (CertInfo
+                               --  bit 0); this client does not inflate
       Buffer_Too_Small);       --  caller's buffer cannot hold the result
 
    --  Select the PIV applet. Must precede every other command on a fresh
@@ -76,7 +80,9 @@ is
    with Pre => Transmit /= null and then PIN'Length in 6 .. 8;
 
    --  Read the X.509 certificate stored for a slot (DER, from the 70 tag
-   --  of the certificate object). Cert_Len is 0 unless Result = Success.
+   --  of the certificate object). A certificate stored compressed (CertInfo
+   --  tag 71, bit 0; yubico-piv-tool --compress) yields Unsupported_Encoding
+   --  rather than bytes that are not DER. Cert_Len is 0 unless Success.
    procedure Read_Certificate
      (Transmit : Transmit_Fn;
       S        : Slot;
@@ -88,8 +94,10 @@ is
              and then Cert'Length <= Max_Object,
      Post => Cert_Len <= Cert'Length and then (if Result /= Success then Cert_Len = 0);
 
-   --  Sign with the key in a slot (the PIN must be verified first for
-   --  slots 9A and 9C; 9E needs no PIN). Input is what the algorithm
+   --  Sign with the key in a slot. PIN policy is the slot's: 9E signs
+   --  without a PIN; 9A needs one VERIFY per card session ("once"); 9C's
+   --  default policy is "always", one VERIFY immediately before EVERY
+   --  signature, otherwise Security_Status. Input is what the algorithm
    --  signs: the digest for ECDSA (32 bytes for P-256, 48 for P-384); for
    --  RSA the complete PKCS#1 v1.5 or PSS encoded block of modulus length,
    --  which the card exponentiates; for Ed25519 the whole message

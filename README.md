@@ -11,10 +11,13 @@ sign. The program never holds the private key.
 caller supplies, so it has no idea what the transport is:
 
 - `Select_Applet`, `Verify_PIN`, `Read_Certificate` (the slot's certificate,
-  DER, from the 70 tag of the certificate object), `Sign` (GENERAL
-  AUTHENTICATE on a digest; ECDSA signatures come back DER-encoded, which is
-  the TLS wire form).
-- BER-TLV parsing, GET RESPONSE collection for long responses (SW1 = 61) and
+  DER, from the 70 tag of the certificate object; a certificate stored
+  gzip-compressed is reported as `Unsupported_Encoding`, not handed up as
+  DER), `Sign` (GENERAL AUTHENTICATE; ECDSA signatures come back
+  DER-encoded, which is the TLS wire form). Slot PIN policy is the card's:
+  9E none, 9A once per session, 9C (default) before every signature.
+- BER-TLV parsing, GET RESPONSE collection for long responses (SW1 = 61;
+  bounded, and a card that promises data without delivering is malformed),
   command chaining (CLA 10) for long commands, status-word mapping (wrong
   PIN with retries left, blocked, security status, not found).
 - Dependencies: `Interfaces`. No allocation, no runtime, no C.
@@ -31,8 +34,10 @@ smart-card interface:
 
 - `PIV.CCID` (`src/`, SPARK): USB CCID rev 1.1 message framing.
   `PC_to_RDR_IccPowerOn`, `PC_to_RDR_XfrBlock`, `RDR_to_PC_DataBlock`;
-  sequence numbers, time-extension retries, command status, length checks
-  on what the device claims. It owns no I/O: a `Reader` carries two
+  message-type and sequence checks (a stale block from an earlier,
+  timed-out command is discarded so the pipe resynchronises), a bounded
+  time-extension budget, command status, length checks on what the device
+  claims. It owns no I/O: a `Reader` carries two
   callbacks, `Bulk_Out (Data)` and `Bulk_In (Data, Len)`, and that is the
   whole OS-specific surface. `tests/test_ccid_mock.adb` drives it with a
   scripted reader.
@@ -97,6 +102,8 @@ handshakes. Command chaining (CLA 10, for RSA-sized payloads) and Ed25519
 Not SPARK: `src-linux/` (sysfs discovery and the two usbfs bulk calls) and
 `examples/`.
 
-The PIN copies (`Verify_PIN`'s padded buffer and the command buffer in
-`Exchange`) are zeroed on every exit with `pragma Inspection_Point`, which
-keeps the store from being optimised away.
+Every user-space copy of the PIN (`Verify_PIN`'s padded buffer, the APDU
+buffer in `PIV.Exchange`, the CCID message buffer, and the two copies in the
+Linux shim) is zeroed on every exit with `pragma Inspection_Point`, which
+keeps the store from being optimised away. The kernel's URB copy is outside
+this program's reach.
