@@ -11,6 +11,7 @@ library project SparkPIV_Linux is
    for Library_Dir use "lib-linux";
    for Create_Missing_Dirs use "True";
    package Compiler is
-      for Default_Switches ("Ada") use ("-gnat2022", "-gnatwa", "-gnatwJ", "-gnatyyM120", "-O2");
+      --  -fno-tree-vrp: see sparkpiv.gpr.
+      for Default_Switches ("Ada") use ("-gnat2022", "-gnatwa", "-gnatwJ", "-gnatyyM120", "-O2", "-fno-tree-vrp");
    end Compiler;
 end SparkPIV_Linux;

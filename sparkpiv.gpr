@@ -6,8 +6,13 @@ library project SparkPIV is
    for Library_Dir use "lib";
    for Create_Missing_Dirs use "True";
    package Compiler is
+      --  -fno-tree-vrp: GCC's value-range propagation miscompiles code of this
+      --  kind in GNAT 15.2 and 16.1 (the GCC 14 change SPARKNaCl works around the
+      --  same way). Measured 2026-09-24 on SPARKNaCl's SHA-256: at -O2 and -O3
+      --  every digest was wrong; with this flag, or at -O1, or with GNAT 13.2,
+      --  all were right. Kept next to -O2, which enables the pass.
       for Default_Switches ("Ada") use
-        ("-gnat2022", "-gnatwa", "-gnatwJ", "-gnatyyM120", "-O2", "-gnatn", "-gnata");
+        ("-gnat2022", "-gnatwa", "-gnatwJ", "-gnatyyM120", "-O2", "-fno-tree-vrp", "-gnatn", "-gnata");
    end Compiler;
    package Prove is
       for Proof_Switches ("Ada") use ("--level=1", "--prover=z3,cvc5,altergo");
